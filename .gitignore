@@ -1,0 +1,15 @@
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+npm-debug.log*
+*.log
+
+# Entorno y secretos
+.env
+.env.*
+
+# Notas locales de sesion
+CLAUDE.local.md
