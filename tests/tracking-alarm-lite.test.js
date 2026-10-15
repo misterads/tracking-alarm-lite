@@ -112,7 +112,7 @@ function sandbox(source, spec, opts) {
     Utilities: { formatDate: fmt, sleep: ms => st.sleeps.push(ms) },
     AdsApp: record(adsImpl),
     MailApp: {
-      getRemainingDailyQuota: () => 100,
+      getRemainingDailyQuota: () => (opts.quota === undefined ? 100 : opts.quota),
       sendEmail: m => { if (st.mailFails > 0) { st.mailFails--; throw new Error('mail server busy'); } st.emails.push(m); }
     },
     SpreadsheetApp: trap('SpreadsheetApp'), AdsManagerApp: trap('AdsManagerApp'),
@@ -182,7 +182,7 @@ test('read-only by construction: no Google Ads mutation call, no Sheet, no MCC, 
 });
 test('only the two Lite rules: the rules and features of the full edition are not in the code', () => {
   for (const w of ['FIXED_VALUE', 'SILENT_ACTION', 'DUPLICATES', 'NOT_CHECKED', 'MISSED_RUN', 'ESCALATION', 'SHEET_URL', 'MUTE',
-    'segments.conversion_action', 'all_conversions', 'BRAND_', 'REPORT_LANGUAGE'])
+    'segments.conversion_action', 'all_conversions', 'conversions_value', 'BRAND_', 'REPORT_LANGUAGE'])
     assert(!LITE.includes(w), 'full-edition token in Lite source: ' + w);
   const c = sandbox(LITE, acct());
   assert.deepEqual(Object.keys(c.CONFIG.RULES), ['SPEND_NO_CONVERSIONS', 'CVR_DROP']);
@@ -223,6 +223,9 @@ test('config validation stops on typos before reading anything; full-edition rul
     throws(() => c.main(), re);
     assert.equal(c.st.queries.length, 0, 'nothing is read when CONFIG is wrong');
     assert.equal(c.st.emails.length, 0);
+    assert(/^Tracking Alarm Lite 1\.0\.0 - CONFIG error: CONFIG\./.test(lastLog(c)), 'the CONFIG error is logged: ' + lastLog(c));
+    assertUpgradeLast(lastLog(c));
+    assert(lastLog(c).endsWith('Get the full edition: ' + STORE), 'even a CONFIG error ends the log with the store link');
   }
   const ok = sandbox(LITE, acct(), { config: { ALERT_EMAILS: 'a@example.com, b@example.com' } });
   assert.deepEqual(Array.from(ok.taConfig(ok.CONFIG).ALERT_EMAILS), ['a@example.com', 'b@example.com']);
@@ -241,17 +244,17 @@ test('full-edition settings pasted into Lite (SHEET_URL, ESCALATION_EMAILS, MUTE
 // =============================================================================
 // Queries
 // =============================================================================
-test('queries: two read-only SELECTs, complete days only, no per-action data', () => {
+test('queries: two read-only SELECTs, complete days only, no per-action data, no conversion value', () => {
   const c = sandbox(LITE, acct());
   run(c);
   assertReadOnly(c);
   const qs = c.st.queries;
   assert.equal(qs.length, 2);
-  assert.equal(qs[0], "SELECT segments.date, metrics.clicks, metrics.cost_micros, metrics.conversions_by_conversion_date, metrics.conversions_value_by_conversion_date FROM customer WHERE segments.date BETWEEN '2026-08-06' AND '2026-10-04'");
+  assert.equal(qs[0], "SELECT segments.date, metrics.clicks, metrics.cost_micros, metrics.conversions_by_conversion_date FROM customer WHERE segments.date BETWEEN '2026-08-06' AND '2026-10-04'");
   assert.equal(qs[1], 'SELECT conversion_action.name, conversion_action.status FROM conversion_action');
   const k = sandbox(LITE, acct(), { config: { COUNT_CONVERSIONS_BY: 'click_date' } });
   run(k);
-  assert(/metrics\.conversions, metrics\.conversions_value FROM customer/.test(k.st.queries[0]) && !/by_conversion_date/.test(k.st.queries[0]));
+  assert(/metrics\.cost_micros, metrics\.conversions FROM customer/.test(k.st.queries[0]) && !/by_conversion_date|conversions_value/.test(k.st.queries[0]));
   const off = sandbox(LITE, acct(), { config: { RULES: { SPEND_NO_CONVERSIONS: { ENABLED: false } } } });
   run(off);
   assert.equal(off.st.queries.length, 1, 'the conversion action list is only read for rule 1');
@@ -356,6 +359,54 @@ test('CVR_DROP is skipped when SPEND_NO_CONVERSIONS already fired, unless SKIP_I
 });
 
 // =============================================================================
+// Exact thresholds (each comparison as documented: "at least" includes the limit)
+// =============================================================================
+test('SPEND_NO_CONVERSIONS thresholds: 7-day spend exactly MIN_COST and clicks exactly MIN_CLICKS fire; one cent or one click less does not', () => {
+  const spend = c1 => off => off <= 7 ? { clicks: 20, cost: off === 1 ? c1 : 7, conv: 0, value: 0 } : HEALTHY(off);
+  let f = only(run(sandbox(LITE, acct({ daily: spend(8) }))), 'SPEND_NO_CONVERSIONS');      // 8 + 6 x 7 = 50.00
+  assert.equal(f.length, 1);
+  assert(/^Shop A \(111-111-1111\): 50\.00 EUR spent/.test(f[0].headline), f[0].headline);
+  assert.deepEqual(rules(run(sandbox(LITE, acct({ daily: spend(7.99) })))), [], '49.99 < MIN_COST 50');
+  const clicks = k1 => off => off <= 7 ? { clicks: off === 1 ? k1 : 1, cost: 10, conv: 0, value: 0 } : HEALTHY(off);
+  f = only(run(sandbox(LITE, acct({ daily: clicks(4) }))), 'SPEND_NO_CONVERSIONS');          // 4 + 6 x 1 = 10 clicks
+  assert.equal(f.length, 1);
+  assert(/\(10 clicks; threshold 50\.00 EUR\)/.test(f[0].headline), f[0].headline);
+  assert.deepEqual(rules(run(sandbox(LITE, acct({ daily: clicks(3) })))), [], '9 clicks < MIN_CLICKS 10');
+});
+test('SPEND_NO_CONVERSIONS strength thresholds: chance exactly MAX_CHANCE and spend exactly 3x the usual cost per conversion are STRONG', () => {
+  const p = Math.exp(-(5 / 30) * 7);                    // LOW_VOL: 5 conversions in the 30 days before, 7 silent days
+  let f = only(run(sandbox(LITE, acct({ daily: LOW_VOL }), { config: { MAX_CHANCE: p } })), 'SPEND_NO_CONVERSIONS')[0];
+  assert.equal(f.strength, 'STRONG');
+  assert(/reason=chance/.test(f.detail), f.detail);
+  f = only(run(sandbox(LITE, acct({ daily: LOW_VOL }), { config: { MAX_CHANCE: p - 1e-9 } })), 'SPEND_NO_CONVERSIONS')[0];
+  assert.equal(f.strength, 'WEAK');
+  // 5 conversions at 60 each in the 30 days before; 7 silent days costing 180 = exactly 3 x 60.
+  const surge = c1 => off => off <= 7 ? { clicks: 20, cost: off === 1 ? c1 : 25, conv: 0, value: 0 } : SURGE(off);
+  f = only(run(sandbox(LITE, acct({ daily: surge(30) }))), 'SPEND_NO_CONVERSIONS')[0];
+  assert.equal(f.strength, 'STRONG');
+  assert(/reason=cost_over_3x_cpa/.test(f.detail), f.detail);
+  assert(/The account spent 3\.0x its usual cost per conversion/.test(f.headline), f.headline);
+  f = only(run(sandbox(LITE, acct({ daily: surge(29) }))), 'SPEND_NO_CONVERSIONS')[0];
+  assert.equal(f.strength, 'WEAK', '179 < 3 x 60');
+});
+test('CVR_DROP thresholds: exactly 50 clicks and exactly 15 base conversions fire; a traffic drop of exactly 20% does not count as "holding"', () => {
+  // 8 clicks and 0.5 conversions a day in the 30 days before (240 clicks, 15 conversions).
+  const small = k1 => off => off <= 7 ? { clicks: off === 1 ? k1 : 7, cost: 5, conv: off === 1 ? 0.05 : 0, value: 0 } : { clicks: 8, cost: 5, conv: 0.5, value: 0 };
+  assert.deepEqual(rules(run(sandbox(LITE, acct({ daily: small(8) })))), ['CVR_DROP'], '8 + 6 x 7 = 50 clicks = MIN_CLICKS');
+  assert.deepEqual(rules(run(sandbox(LITE, acct({ daily: small(7) })))), [], '49 clicks < MIN_CLICKS 50');
+  const base = b => off => off <= 7 ? { clicks: 100, cost: 50, conv: off === 1 ? 0.05 : 0, value: 0 } : { clicks: 100, cost: 50, conv: b, value: 0 };
+  let f = only(run(sandbox(LITE, acct({ daily: base(0.5) }))), 'CVR_DROP');
+  assert.equal(f.length, 1);
+  assert(/on a baseline of 15\.0 conversions/.test(f[0].headline), f[0].headline);
+  assert.deepEqual(rules(run(sandbox(LITE, acct({ daily: base(0.48) })))), [], '14.4 < MIN_BASE_CONVERSIONS 15');
+  const traffic = k => off => off <= 7 ? { clicks: k, cost: 50, conv: 0.8, value: 0 } : HEALTHY(off);
+  assert.deepEqual(rules(run(sandbox(LITE, acct({ daily: traffic(80) })))), [], 'daily clicks 100 -> 80: fell exactly 20%, not holding');
+  f = only(run(sandbox(LITE, acct({ daily: traffic(81) }))), 'CVR_DROP');
+  assert.equal(f.length, 1);
+  assert(/while daily clicks fell 19% \(100\.0 -> 81\.0\)/.test(f[0].headline), f[0].headline);
+});
+
+// =============================================================================
 // The rules of the full edition do not exist in Lite
 // =============================================================================
 // Accounts that make the full edition fire its other rules.
@@ -453,6 +504,23 @@ test('email: one retry after 5 s; if it still fails the run fails, after logging
   throws(() => c.main(), /finished with problems - email: FAILED: mail server busy/);
   assert(/SPEND_NO_CONVERSIONS/.test(lastLog(c)));
   assertUpgradeLast(lastLog(c));
+});
+test('email: a full daily quota is not retried; the run fails after logging the findings and the store link', () => {
+  const c = sandbox(LITE, acct({ daily: NO_CONV_7D }), { quota: 0 });
+  throws(() => c.main(), /finished with problems - email: FAILED: daily email quota exhausted/);
+  assert.deepEqual(c.st.sleeps, [], 'no 5 s wait when the quota is exhausted');
+  assert.equal(c.st.emails.length, 0);
+  assert.equal(c.st.logs.filter(l => /^Email attempt/.test(l)).length, 1, 'one attempt only');
+  assert(/SPEND_NO_CONVERSIONS/.test(lastLog(c)));
+  assertUpgradeLast(lastLog(c));
+});
+test('email: the full-version block is HTML-escaped too', () => {
+  const c = sandbox(LITE, acct({ daily: NO_CONV_7D }));
+  c.TA_UPGRADE_POINTS = ['<script>x</script> & "y"'];
+  run(c);
+  const block = c.st.emails[0].htmlBody.slice(c.st.emails[0].htmlBody.indexOf('id="tracking-alarm-upgrade"'));
+  assert(block.includes('<li>&lt;script&gt;x&lt;/script&gt; &amp; &quot;y&quot;</li>'), block);
+  assert(!block.includes('<script>'));
 });
 test('changing TAL_STORE_URL changes the link in the email and in the log', () => {
   const src = LITE.replace(STORE, 'https://store.example.com/full');

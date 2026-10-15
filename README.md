@@ -10,7 +10,7 @@ A free Google Ads Script that emails you when the conversion tracking of your ac
 
 Each run:
 
-1. Reads the last 60 complete days of the account (clicks, cost, conversions and conversion value; yesterday is the last day, today is never read because it is incomplete) and the list of conversion actions, only to tell you when none of them is enabled.
+1. Reads the last 60 complete days of the account (clicks, cost and conversions; yesterday is the last day, today is never read because it is incomplete) and the list of conversion actions, only to tell you when none of them is enabled.
 2. Checks two rules:
 
 | Rule | Fires when (defaults) | Severity |
@@ -65,7 +65,7 @@ Invalid values (for example `MIN_COST: '50'` as text, or `ENABLED: 'true'` in qu
 - **Email** (one per run at most). Subject like `Tracking Alarm Lite - Shop (123-456-7890) - 05-10: 1 finding(s), 1 critical`. Body: a table with severity, strength, rule and a plain-language explanation with the numbers (for example "280.00 EUR spent and 0 conversions in the last 7 days (630 clicks; threshold 50.00 EUR). Last conversion on 2026-09-27, 7 days ago..."), what each rule means, notes, and at the end a short block about the full edition with its link.
 - **Script log**: the same findings, ending with the same block.
 - **If the account cannot be read**: the email says so and the run is marked as failed in Google Ads. Unchecked is not the same as clean.
-- **If the email cannot be sent**: one retry after 5 seconds; if it still fails, the findings stay in the log and the run is marked as failed.
+- **If the email cannot be sent**: one retry after 5 seconds (none if the daily email quota is exhausted); if it still fails, the findings stay in the log and the run is marked as failed.
 
 ## Limitations
 

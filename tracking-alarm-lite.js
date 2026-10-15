@@ -74,7 +74,14 @@ var CONFIG = {
 var TAL_STORE_URL = 'https://carlesmister.gumroad.com/l/tracking-alarm';
 
 function main() {
-  var cfg = taConfig(CONFIG);
+  var cfg;
+  try {
+    cfg = taConfig(CONFIG);
+  } catch (eCfg) {
+    // A CONFIG error stops the run, but the log still ends with the full-version block.
+    Logger.log('Tracking Alarm Lite ' + TA_VERSION + ' - CONFIG error: ' + taErr(eCfg) + '\n\n' + taUpgradeLines().join('\n'));
+    throw eCfg;
+  }
   var run = taStartRun();
   var result;
   try {
@@ -96,8 +103,8 @@ var TA_LOOKBACK_DAYS = 60;
 var TA_EMAIL_ATTEMPTS = 2;
 var TA_EMAIL_RETRY_MS = 5000;
 var TA_FIELDS = {
-  conversion_date: { conv: 'conversions_by_conversion_date', value: 'conversions_value_by_conversion_date' },
-  click_date: { conv: 'conversions', value: 'conversions_value' }
+  conversion_date: { conv: 'conversions_by_conversion_date' },
+  click_date: { conv: 'conversions' }
 };
 var TA_RULE_TEXT = {
   SPEND_NO_CONVERSIONS: 'Spend without conversions: the account spent more than its threshold in the last 7 days and recorded zero conversions. Either the tracking is broken or the money is not working.',
@@ -216,11 +223,11 @@ function taWindows(today) {
 }
 
 function taSum(rows, from, to) {
-  var s = { clicks: 0, cost: 0, conv: 0, value: 0 };
+  var s = { clicks: 0, cost: 0, conv: 0 };
   for (var i = 0; i < rows.length; i++) {
     var r = rows[i];
     if (r.date < from || r.date > to) continue;
-    s.clicks += r.clicks; s.cost += r.cost; s.conv += r.conv; s.value += r.value;
+    s.clicks += r.clicks; s.cost += r.cost; s.conv += r.conv;
   }
   return s;
 }
@@ -239,17 +246,16 @@ function taLastConversion(rows, to) {
 // ---------------------------------------------------------------------------
 function taQueryDaily(cfg, w) {
   var f = TA_FIELDS[cfg.COUNT_CONVERSIONS_BY];
-  var q = 'SELECT segments.date, metrics.clicks, metrics.cost_micros, metrics.' + f.conv + ', metrics.' + f.value
+  var q = 'SELECT segments.date, metrics.clicks, metrics.cost_micros, metrics.' + f.conv
     + ' FROM customer WHERE segments.date BETWEEN \'' + w.start + '\' AND \'' + w.yesterday + '\'';
   var it = AdsApp.search(q), byDate = {};
   while (it.hasNext()) {
     var row = it.next(), m = row.metrics || {}, date = String((row.segments || {}).date || '');
     if (!date) continue;
-    var r = byDate[date] || (byDate[date] = { date: date, clicks: 0, cost: 0, conv: 0, value: 0 });
+    var r = byDate[date] || (byDate[date] = { date: date, clicks: 0, cost: 0, conv: 0 });
     r.clicks += taNum(m.clicks);
     r.cost += taNum(m.costMicros) / 1000000;
     r.conv += taNum(m[taCamel(f.conv)]);
-    r.value += taNum(m[taCamel(f.value)]);
   }
   return Object.keys(byDate).sort().map(function (k) { return byDate[k]; });
 }
@@ -543,8 +549,12 @@ function taText(report) {
   }
   for (var j = 0; j < report.notes.length; j++) lines.push('Note: ' + report.notes[j]);
   lines.push('');
-  lines.push('--- ' + TA_UPGRADE_TITLE + ' ---');
-  for (var k = 0; k < TA_UPGRADE_POINTS.length; k++) lines.push('- ' + TA_UPGRADE_POINTS[k]);
-  lines.push('Get the full edition: ' + TAL_STORE_URL);
-  return lines.join('\n');
+  return lines.concat(taUpgradeLines()).join('\n');
+}
+
+function taUpgradeLines() {
+  var t = ['--- ' + TA_UPGRADE_TITLE + ' ---'];
+  for (var k = 0; k < TA_UPGRADE_POINTS.length; k++) t.push('- ' + TA_UPGRADE_POINTS[k]);
+  t.push('Get the full edition: ' + TAL_STORE_URL);
+  return t;
 }
